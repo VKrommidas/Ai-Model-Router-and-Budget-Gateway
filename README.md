@@ -171,8 +171,8 @@ npm test
 
 ### 1. Clone & Install
 ```bash
-git clone https://github.com/your-username/ai-model-router-and-budget-gateway.git
-cd ai-model-router-and-budget-gateway
+git clone https://github.com/VKrommidas/Ai-Model-Router-and-Budget-Gateway.git
+cd Ai-Model-Router-and-Budget-Gateway
 npm install
 ```
 
