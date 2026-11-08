@@ -14,38 +14,55 @@ export class GeminiProvider implements LLMProvider {
       throw new Error('Gemini API key is not configured');
     }
 
-    const apiCall = this.genAI.models.generateContent({
-      model: options.model,
-      contents: prompt,
-    });
-
-    if (options.signal) {
-      const signal = options.signal;
-      const abortPromise = new Promise<{ text: string; tokens: TokenUsage; model: string }>((_, reject) => {
-        if (signal.aborted) return reject(new Error('Request aborted'));
-        signal.addEventListener('abort', () => reject(new Error('Request aborted')));
+    const executeCall = async (modelToUse: string) => {
+      const call = this.genAI.models.generateContent({
+        model: modelToUse,
+        contents: prompt,
       });
 
-      return Promise.race([
-        apiCall.then(response => {
-          const text = response.text || '';
-          const tokens = {
-            prompt: response.usageMetadata?.promptTokenCount || 0,
-            completion: response.usageMetadata?.candidatesTokenCount || 0,
-          };
-          return { text, tokens, model: options.model };
-        }),
-        abortPromise
-      ]);
-    }
-
-    const response = await apiCall;
-    const text = response.text || '';
-    const tokens = {
-      prompt: response.usageMetadata?.promptTokenCount || 0,
-      completion: response.usageMetadata?.candidatesTokenCount || 0,
+      if (options.signal) {
+        const signal = options.signal;
+        const abortPromise = new Promise<any>((_, reject) => {
+          if (signal.aborted) return reject(new Error('Request aborted'));
+          signal.addEventListener('abort', () => reject(new Error('Request aborted')));
+        });
+        return Promise.race([call, abortPromise]);
+      }
+      return call;
     };
-    return { text, tokens, model: options.model };
+
+    try {
+      const response = await executeCall(options.model);
+      const text = response.text || '';
+      const tokens = {
+        prompt: response.usageMetadata?.promptTokenCount || 0,
+        completion: response.usageMetadata?.candidatesTokenCount || 0,
+      };
+      return { text, tokens, model: options.model };
+    } catch (err: any) {
+      const errMsg = err.message || String(err);
+      if (errMsg.includes('429') || errMsg.includes('Quota exceeded') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('NOT_FOUND') || errMsg.includes('404')) {
+        console.warn(`[GeminiProvider] Model ${options.model} issue encountered (${errMsg.slice(0, 80)}...). Attempting modern model fallback...`);
+        const fallbackCandidates = ['gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.1-pro-preview'];
+        
+        for (const candidate of fallbackCandidates) {
+          if (candidate === options.model) continue;
+          try {
+            console.info(`[GeminiProvider] Trying fallback: ${candidate}...`);
+            const fallbackResp = await executeCall(candidate);
+            const text = fallbackResp.text || '';
+            const tokens = {
+              prompt: fallbackResp.usageMetadata?.promptTokenCount || 0,
+              completion: fallbackResp.usageMetadata?.candidatesTokenCount || 0,
+            };
+            return { text, tokens, model: candidate };
+          } catch (candErr: any) {
+            console.warn(`[GeminiProvider] Fallback ${candidate} failed:`, candErr.message || candErr);
+          }
+        }
+      }
+      throw err;
+    }
   }
 
   estimateCost(tokens: TokenUsage, model: string): number {

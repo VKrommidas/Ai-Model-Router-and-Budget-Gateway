@@ -12,7 +12,8 @@ export class SemanticSearchService {
     this.cacheProvider = cacheProvider;
     this.embeddingService = new EmbeddingService();
     this.similarityThreshold = parseFloat(process.env.SEMANTIC_SIMILARITY_THRESHOLD || '0.90');
-    this.cacheEnabled = process.env.CACHE_ENABLED === 'true';
+    // Default to true unless explicitly 'false'
+    this.cacheEnabled = process.env.CACHE_ENABLED !== 'false';
     const ttlHours = parseFloat(process.env.CACHE_TTL_HOURS || '24');
     this.ttlMs = ttlHours * 60 * 60 * 1000;
   }
@@ -21,39 +22,51 @@ export class SemanticSearchService {
     return this.cacheEnabled;
   }
 
-  async searchCache(prompt: string): Promise<{ hit: boolean, entry?: CacheEntry, embedding?: number[] }> {
+  getThreshold(): number {
+    return this.similarityThreshold;
+  }
+
+  async searchCache(prompt: string): Promise<{ hit: boolean; entry?: CacheEntry; embedding?: number[] }> {
     if (!this.isEnabled()) return { hit: false };
 
     try {
-      // 1. Generate embedding
+      // 1. Generate embedding vector for the incoming prompt
       const embedding = await this.embeddingService.generateEmbedding(prompt);
       
-      // 2. Search for similar items
+      // 2. Perform Cosine Similarity Search over cached prompt vectors
       const match = await this.cacheProvider.search(embedding, this.similarityThreshold);
 
       if (match) {
-        // 3. Check expiration (Stale Responses)
+        // 3. TTL Check
         const age = Date.now() - new Date(match.timestamp).getTime();
         if (age > this.ttlMs) {
-          console.log('[SemanticSearch] Cache hit but stale.');
+          console.info('[SemanticSearch] Cache candidate found but exceeded TTL (stale).');
           return { hit: false, embedding };
         }
         
-        console.log(`[SemanticSearch] Cache HIT! Similarity above ${this.similarityThreshold}`);
+        console.info(`[SemanticSearch] Cache HIT! (${( (match.similarity || 0) * 100 ).toFixed(1)}% match)`);
         return { hit: true, entry: match, embedding };
       }
 
-      console.log(`[SemanticSearch] Cache MISS.`);
+      console.info('[SemanticSearch] Cache MISS (no matches >= threshold).');
       return { hit: false, embedding };
-    } catch (e) {
-      console.error('[SemanticSearch] Error during cache search:', e);
+    } catch (e: any) {
+      console.warn('[SemanticSearch] Cache bypass due to lookup/embedding warning:', e.message);
       return { hit: false };
     }
   }
 
   async storeCache(prompt: string, response: string, embedding: number[], cost: number, duration: number): Promise<void> {
     if (!this.isEnabled()) return;
-    await this.cacheProvider.store(prompt, response, embedding, cost, duration);
+    try {
+      let vec = embedding;
+      if (!vec || vec.length === 0) {
+        vec = await this.embeddingService.generateEmbedding(prompt);
+      }
+      await this.cacheProvider.store(prompt, response, vec, cost, duration);
+    } catch (e: any) {
+      console.warn('[SemanticSearch] storeCache skipped due to error:', e.message);
+    }
   }
 
   recordHit(costSaved: number, latencySaved: number) {

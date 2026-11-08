@@ -23,6 +23,24 @@ interface GlobalConfig {
   failoverOrder: string[];
   timeoutMs: number;
   maxRetries: number;
+  uptimeSeconds?: number;
+  difficultyThreshold?: number;
+}
+
+function formatCost(cost: number | undefined): string {
+  if (cost === undefined || isNaN(cost)) return '$0.00';
+  if (cost > 0 && cost < 1) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+function formatUptime(seconds?: number): string {
+  if (!seconds || seconds <= 0) return 'Just started';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 interface Log {
@@ -36,13 +54,15 @@ interface Log {
   difficulty: number;
   classification: string;
   duration: number;
+  cached?: boolean;
 }
 
 const PROVIDER_COLORS = {
   gemini: '#D44D26',
   openai: '#10A37F',
   claude: '#D97757',
-  ollama: '#3B82F6'
+  ollama: '#3B82F6',
+  cache: '#10B981'
 };
 
 export default function App() {
@@ -56,6 +76,15 @@ export default function App() {
   const [lastResult, setLastResult] = useState<any>(null);
   const [routeError, setRouteError] = useState<{ message: string; status: number } | null>(null);
 
+  // Global Config Form State
+  const [budgetInput, setBudgetInput] = useState<string>('');
+  const [timeoutInput, setTimeoutInput] = useState<string>('');
+  const [retriesInput, setRetriesInput] = useState<string>('');
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configSaveMsg, setConfigSaveMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [providerEdits, setProviderEdits] = useState<Record<string, { cheapModel: string; expertModel: string }>>({});
+  const [savingProvider, setSavingProvider] = useState<string | null>(null);
+
   const fetchData = async () => {
     try {
       const [configRes, logsRes] = await Promise.all([
@@ -66,8 +95,85 @@ export default function App() {
       const logsData = await logsRes.json();
       setConfig(configData);
       setLogs(logsData);
+
+      setBudgetInput(prev => (prev === '' ? String(configData.monthlyBudget ?? 50) : prev));
+      setTimeoutInput(prev => (prev === '' ? String((configData.timeoutMs || 60000) / 1000) : prev));
+      setRetriesInput(prev => (prev === '' ? String(configData.maxRetries ?? 2) : prev));
+
+      if (configData.providers) {
+        setProviderEdits(prev => {
+          const next = { ...prev };
+          for (const [name, p] of Object.entries(configData.providers as Record<string, any>)) {
+            if (!next[name]) {
+              next[name] = { cheapModel: p.cheapModel, expertModel: p.expertModel };
+            }
+          }
+          return next;
+        });
+      }
     } catch (error) {
       console.error('Fetch error:', error);
+    }
+  };
+
+  const handleSaveGlobalConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setConfigSaving(true);
+    setConfigSaveMsg(null);
+    try {
+      const budgetNum = parseFloat(budgetInput);
+      const timeoutSec = parseInt(timeoutInput);
+      const retriesNum = parseInt(retriesInput);
+
+      if (isNaN(budgetNum) || isNaN(timeoutSec) || isNaN(retriesNum)) {
+        setConfigSaveMsg({ type: 'error', text: 'All fields must be valid numbers.' });
+        setConfigSaving(false);
+        return;
+      }
+
+      const res = await fetch('/api/config/global', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          monthlyBudget: budgetNum,
+          timeoutMs: timeoutSec * 1000,
+          maxRetries: retriesNum
+        })
+      });
+      if (res.ok) {
+        setConfigSaveMsg({ type: 'success', text: 'Parameters saved successfully!' });
+        fetchData();
+      } else {
+        const err = await res.json();
+        setConfigSaveMsg({ type: 'error', text: err.error || 'Failed to update.' });
+      }
+    } catch {
+      setConfigSaveMsg({ type: 'error', text: 'Network error saving configuration.' });
+    } finally {
+      setConfigSaving(false);
+      setTimeout(() => setConfigSaveMsg(null), 4000);
+    }
+  };
+
+  const handleSaveProviderModels = async (name: string) => {
+    const edits = providerEdits[name];
+    if (!edits) return;
+    setSavingProvider(name);
+    try {
+      await fetch('/api/config/providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: name,
+          cheapModel: edits.cheapModel,
+          expertModel: edits.expertModel
+        })
+      });
+      fetchData();
+    } catch (e) {
+      console.error('Failed to update provider models', e);
+    } finally {
+      setSavingProvider(null);
     }
   };
 
@@ -136,11 +242,19 @@ export default function App() {
   const getProviderColor = (name: string) => PROVIDER_COLORS[name as keyof typeof PROVIDER_COLORS] || '#1A1A1A';
 
   const providerStats = logs.reduce((acc: any, log) => {
-    acc[log.provider] = (acc[log.provider] || 0) + 1;
+    const prov = (log.provider || '').toLowerCase().trim();
+    if (prov && prov !== 'undefined' && prov !== 'null') {
+      acc[prov] = (acc[prov] || 0) + 1;
+    }
     return acc;
   }, {});
 
+  const totalValidLogs = (Object.values(providerStats).reduce((a: number, b: any) => a + Number(b), 0) as number) || logs.length || 1;
   const pieData = Object.entries(providerStats).map(([name, value]) => ({ name, value: value as number }));
+
+  const qualityScore = logs.length > 0
+    ? ((logs.filter(l => l.response && !l.response.toLowerCase().includes('error')).length / logs.length) * 100).toFixed(1)
+    : '100.0';
   
   const dailySpendData = logs.reduce((acc: any, log) => {
     const date = new Date(log.timestamp).toLocaleDateString();
@@ -175,7 +289,9 @@ export default function App() {
               <span className="w-1.5 h-1.5 rounded-full bg-[#D44D26] animate-pulse" />
               Status: Operational
             </p>
-            <p className="text-[11px] font-semibold uppercase tracking-widest opacity-40">System uptime: 99.98%</p>
+            <p className="text-[11px] font-semibold uppercase tracking-widest opacity-60">
+              System Uptime: {formatUptime(config?.uptimeSeconds)}
+            </p>
             <div className="mt-4 flex gap-8">
               <NavButton label="01 / Overview" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
               <NavButton label="02 / Playground" active={activeTab === 'playground'} onClick={() => setActiveTab('playground')} />
@@ -199,12 +315,12 @@ export default function App() {
                     Intelligence-weighted distribution prioritizing cost-efficiency without compromising query accuracy.
                   </p>
                   <div className="space-y-5">
-                    <PolicyRow label="Difficulty Threshold" value="0.75" />
+                    <PolicyRow label="Difficulty Threshold" value={config?.difficultyThreshold ? config.difficultyThreshold.toFixed(2) : "0.60"} />
                     <PolicyRow label="Failover Order" value={config?.failoverOrder?.join(' → ') || 'None'} />
                     <PolicyRow 
                       label="Aggressive Frugality" 
-                      value={budgetUsage > 80 ? "ACTIVE" : "STANDBY"} 
-                      highlight={budgetUsage > 80} 
+                      value={budgetUsage > 90 ? "ACTIVE" : "STANDBY"} 
+                      highlight={budgetUsage > 90} 
                     />
                   </div>
                 </div>
@@ -212,8 +328,8 @@ export default function App() {
                 <div className="bg-[#1A1A1A] text-white p-6 rounded-sm mt-auto">
                   <p className="text-[9px] uppercase tracking-[0.2em] mb-3 opacity-60 font-bold">System Alert</p>
                   <p className="text-xs leading-relaxed font-serif italic">
-                    {budgetUsage > 80 
-                      ? `Daily budget ceiling approaching (${budgetUsage.toFixed(0)}%). Throttling Expert Tier requests to preserve resources.`
+                    {budgetUsage > 90 
+                      ? `Monthly budget ceiling approaching (${budgetUsage.toFixed(0)}%). Throttling Expert Tier requests to preserve resources.`
                       : "System operating within normal parameters. Capacity allocation optimized."
                     }
                   </p>
@@ -229,9 +345,9 @@ export default function App() {
                     <div className="flex justify-between items-end mb-4 px-1">
                       <div className="flex flex-col">
                         <span className="text-[10px] font-bold uppercase tracking-widest text-[#666] mb-1">Total Expenditure</span>
-                        <span className="text-7xl font-serif tracking-tighter leading-none">${config?.totalSpend?.toFixed(2) ?? '0.00'}</span>
+                        <span className="text-7xl font-serif tracking-tighter leading-none">{formatCost(config?.totalSpend)}</span>
                       </div>
-                      <span className="text-xl font-serif italic text-[#666]">of ${config?.monthlyBudget?.toFixed(2) ?? '0.00'} Limit</span>
+                      <span className="text-xl font-serif italic text-[#666]">of {formatCost(config?.monthlyBudget)} Limit</span>
                     </div>
                     <div className="w-full h-14 bg-[#1A1A1A]/5 relative flex items-center p-1.5 overflow-hidden">
                       <div 
@@ -240,13 +356,13 @@ export default function App() {
                       ></div>
                       <div 
                         className="absolute top-0 h-full w-0.5 bg-[#D44D26] z-10" 
-                        style={{ left: '80%' }}
+                        style={{ left: '90%' }}
                       ></div>
                     </div>
                     <div className="mt-3 flex justify-between text-[10px] uppercase font-bold tracking-tighter text-[#666]">
                       <span>0.00 USD</span>
-                      <span className="text-[#D44D26]">Threshold Warn (80%)</span>
-                      <span>{config?.monthlyBudget?.toFixed(2) ?? '0.00'} MAX</span>
+                      <span className="text-[#D44D26]">Frugality Shift (90%)</span>
+                      <span>{formatCost(config?.monthlyBudget)} MAX</span>
                     </div>
                   </div>
 
@@ -270,7 +386,7 @@ export default function App() {
                     <div className="flex flex-col justify-end">
                       <p className="text-sm leading-relaxed text-[#444] font-serif italic">
                         <strong className="text-[#1A1A1A] block not-italic mb-2 uppercase text-[10px] tracking-widest">Analysis Note</strong>
-                        High-complexity queries are currently costing an average of ${(config?.totalSpend && logs.length ? config.totalSpend/logs.length : 0).toFixed(4)} per request. {budgetUsage > 80 ? "Aggressive fallback mechanisms engaged." : "Capacity available for expert tier calls."}
+                        High-complexity queries are currently costing an average of ${(config?.totalSpend && logs.length ? config.totalSpend/logs.length : 0).toFixed(4)} per request. {budgetUsage > 90 ? "Aggressive fallback mechanisms engaged." : "Capacity available for expert tier calls."}
                       </p>
                     </div>
                   </div>
@@ -283,7 +399,7 @@ export default function App() {
                 
                 <div className="space-y-10">
                   {pieData.sort((a, b) => b.value - a.value).map((prov, idx) => {
-                    const percentage = Math.round((prov.value / (logs.length || 1)) * 100);
+                    const percentage = Math.round((prov.value / totalValidLogs) * 100);
                     return (
                       <div key={prov.name} className="group">
                         <div className="flex justify-between items-baseline mb-2">
@@ -307,7 +423,7 @@ export default function App() {
                 <div className="mt-auto">
                   <div className="p-8 border-2 border-[#1A1A1A] text-center bg-white">
                     <p className="text-[10px] font-bold uppercase tracking-[0.2em] mb-2 text-[#666]">Quality Score</p>
-                    <p className="text-5xl font-serif tracking-tighter">94.2<span className="text-2xl font-normal opacity-50">%</span></p>
+                    <p className="text-5xl font-serif tracking-tighter">{qualityScore}<span className="text-2xl font-normal opacity-50">%</span></p>
                   </div>
                 </div>
               </section>
@@ -363,26 +479,40 @@ export default function App() {
               {lastResult && (
                 <div className="animate-in fade-in slide-in-from-bottom-8 duration-700 bg-white border border-[#1A1A1A]/10 p-12 relative overflow-hidden">
                    <div className="absolute top-0 left-0 w-2 h-full" style={{ backgroundColor: getProviderColor(lastResult.provider) }} />
+                   
+                   {lastResult.cached && (
+                     <div className="mb-6 flex items-center gap-3 bg-emerald-50 border border-emerald-300 text-emerald-800 px-4 py-2.5 text-[10px] font-bold uppercase tracking-[0.2em]">
+                       <Zap className="w-4 h-4 text-emerald-600 fill-emerald-600 animate-pulse" />
+                       <span>Semantic Vector Cache Hit &mdash; Cosine Similarity &ge; 90% (Zero LLM Tokens Consumed)</span>
+                     </div>
+                   )}
+
                    <div className="flex flex-col md:flex-row justify-between mb-12 border-b border-[#1A1A1A]/10 pb-8 gap-8">
                      <div className="space-y-6">
                         <div>
                           <p className="text-[10px] font-bold uppercase tracking-widest text-[#666] mb-1">Selected Terminal</p>
-                          <p className="text-3xl font-serif italic">{lastResult.model}</p>
-                          <p className="text-[10px] font-bold uppercase tracking-widest mt-2" style={{ color: getProviderColor(lastResult.provider) }}>{lastResult.provider} Gateway</p>
+                          <p className="text-3xl font-serif italic">{lastResult.cached ? 'Semantic Vector Cache' : lastResult.model}</p>
+                          <p className="text-[10px] font-bold uppercase tracking-widest mt-2" style={{ color: getProviderColor(lastResult.provider) }}>
+                            {lastResult.cached ? 'Vector Store (Local)' : `${lastResult.provider} Gateway`}
+                          </p>
                         </div>
                         <div className="flex gap-12">
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-widest text-[#666] mb-1">Estimated Difficulty</p>
-                            <p className="text-xl font-mono">{(lastResult.difficulty * 100).toFixed(0)}%</p>
+                            <p className="text-xl font-mono">{lastResult.cached ? '0% (Bypassed)' : `${(lastResult.difficulty * 100).toFixed(0)}%`}</p>
                           </div>
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-widest text-[#666] mb-1">Cost Weight</p>
-                            <p className="text-xl font-mono text-[#D44D26]">${lastResult.cost.toFixed(5)}</p>
+                            <p className={cn("text-xl font-mono", lastResult.cached ? "text-emerald-600 font-bold" : "text-[#D44D26]")}>
+                              {lastResult.cached ? '$0.00000 (Free)' : formatCost(lastResult.cost)}
+                            </p>
                           </div>
                         </div>
                      </div>
                      <div className="text-right flex flex-col justify-end">
-                       <p className="text-[10px] font-bold tracking-widest uppercase py-1 border-y border-[#1A1A1A]/10 mb-4 inline-block">Route Classification: {lastResult.classification}</p>
+                       <p className="text-[10px] font-bold tracking-widest uppercase py-1 border-y border-[#1A1A1A]/10 mb-4 inline-block">
+                         Route Classification: {lastResult.cached ? 'Vector Cache Hit' : lastResult.classification}
+                       </p>
                        <p className="text-sm font-mono text-[#999]">Latency: {lastResult.duration}ms</p>
                      </div>
                    </div>
@@ -422,11 +552,15 @@ export default function App() {
                         <td className="px-6 py-6">
                           <div className="flex items-center gap-3">
                               <div className="w-1.5 h-1.5 rounded-sm" style={{ backgroundColor: getProviderColor(log.provider) }} />
-                             <span className="text-sm font-bold uppercase tracking-widest not-italic">{log.provider} / {log.model}</span>
+                             <span className="text-sm font-bold uppercase tracking-widest not-italic">
+                               {log.cached ? '⚡ SEMANTIC CACHE' : `${log.provider} / ${log.model}`}
+                             </span>
                           </div>
                         </td>
                         <td className="px-6 py-6 text-right">
-                          <div className="text-lg font-mono font-bold not-italic">${log.cost.toFixed(4)}</div>
+                          <div className={cn("text-lg font-mono font-bold not-italic", log.cached ? "text-emerald-600" : "text-[#1A1A1A]")}>
+                            {log.cached ? '$0.0000 (Free)' : formatCost(log.cost)}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -441,6 +575,84 @@ export default function App() {
             <div className="col-span-12 py-12 space-y-12">
               <h2 className="text-[11px] font-bold uppercase tracking-widest py-2 border-y border-[#1A1A1A]/10 w-full">04 / Provider Controls & Infra</h2>
               
+              {/* Global Gateway Parameters Card */}
+              <div className="bg-white border border-[#1A1A1A]/10 p-8 shadow-sm">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6 pb-6 border-b border-[#1A1A1A]/10">
+                  <div>
+                    <h3 className="font-serif text-2xl italic">Global FinOps & Runtime Parameters</h3>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-[#666] mt-1">
+                      Real-time circuit-breaking limits and failover parameters
+                    </p>
+                  </div>
+                  {configSaveMsg && (
+                    <span className={cn(
+                      "text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 transition-all",
+                      configSaveMsg.type === 'success' ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+                    )}>
+                      {configSaveMsg.text}
+                    </span>
+                  )}
+                </div>
+
+                <form onSubmit={handleSaveGlobalConfig} className="grid grid-cols-1 md:grid-cols-4 gap-6 items-end">
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#666] mb-2">
+                      Monthly Budget (USD)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.0001"
+                      value={budgetInput}
+                      onChange={(e) => setBudgetInput(e.target.value)}
+                      className="w-full font-mono text-sm border border-[#1A1A1A]/20 p-2.5 outline-none focus:border-[#1A1A1A]"
+                      placeholder="e.g. 50.00"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#666] mb-2">
+                      Request Timeout (Seconds)
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      min="5"
+                      max="300"
+                      value={timeoutInput}
+                      onChange={(e) => setTimeoutInput(e.target.value)}
+                      className="w-full font-mono text-sm border border-[#1A1A1A]/20 p-2.5 outline-none focus:border-[#1A1A1A]"
+                      placeholder="e.g. 60"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#666] mb-2">
+                      Max Retries (Per Provider)
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      max="5"
+                      value={retriesInput}
+                      onChange={(e) => setRetriesInput(e.target.value)}
+                      className="w-full font-mono text-sm border border-[#1A1A1A]/20 p-2.5 outline-none focus:border-[#1A1A1A]"
+                      placeholder="e.g. 2"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={configSaving}
+                    className="w-full bg-[#1A1A1A] text-white py-3 text-[10px] font-bold uppercase tracking-[0.2em] hover:bg-[#D44D26] transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    {configSaving ? 'Saving...' : 'Save Parameters'}
+                  </button>
+                </form>
+              </div>
+
+              {/* Providers Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
                 {config && Object.entries(config.providers).map(([name, p]: [string, any]) => (
                   <div key={name} className="border border-[#1A1A1A]/10 p-6 bg-white shadow-sm flex flex-col group relative overflow-hidden">
@@ -452,34 +664,61 @@ export default function App() {
                          title={p.healthy ? "Healthy" : "Unhealthy"}
                       ></span>
                     </h3>
-                    <div className="text-[10px] uppercase font-bold tracking-widest text-[#666] mb-4 space-y-2">
-                      <div className="flex justify-between">
+                    <div className="text-[10px] uppercase font-bold tracking-widest text-[#666] mb-4 space-y-3">
+                      <div className="flex justify-between items-center">
                         <span>Status</span>
-                        <span className="text-[#1A1A1A]">{p.enabled ? 'ENABLED' : 'DISABLED'}</span>
+                        <span className={cn("px-2 py-0.5 text-[9px] font-bold tracking-widest", p.enabled ? "bg-green-100 text-green-800" : "bg-zinc-100 text-zinc-500")}>
+                          {p.enabled ? 'ENABLED' : 'DISABLED'}
+                        </span>
                       </div>
-                      <div className="flex justify-between">
+                      <div className="flex justify-between items-center">
                         <span>Priority</span>
-                        <span className="text-[#1A1A1A]">{p.priority}</span>
+                        <span className="text-[#1A1A1A] font-mono">{p.priority}</span>
                       </div>
-                      <div className="flex justify-between">
-                        <span>Cheap Model</span>
-                        <span className="text-[#1A1A1A]">{p.cheapModel}</span>
+                      <div>
+                        <span className="block mb-1">Cheap Model</span>
+                        <input
+                          type="text"
+                          value={providerEdits[name]?.cheapModel ?? p.cheapModel}
+                          onChange={(e) => setProviderEdits(prev => ({
+                            ...prev,
+                            [name]: { ...prev[name], cheapModel: e.target.value, expertModel: prev[name]?.expertModel ?? p.expertModel }
+                          }))}
+                          className="w-full font-mono text-xs border border-[#1A1A1A]/20 px-2 py-1 outline-none focus:border-[#1A1A1A]"
+                        />
                       </div>
-                      <div className="flex justify-between">
-                        <span>Expert Model</span>
-                        <span className="text-[#1A1A1A]">{p.expertModel}</span>
+                      <div>
+                        <span className="block mb-1">Expert Model</span>
+                        <input
+                          type="text"
+                          value={providerEdits[name]?.expertModel ?? p.expertModel}
+                          onChange={(e) => setProviderEdits(prev => ({
+                            ...prev,
+                            [name]: { cheapModel: prev[name]?.cheapModel ?? p.cheapModel, expertModel: e.target.value }
+                          }))}
+                          className="w-full font-mono text-xs border border-[#1A1A1A]/20 px-2 py-1 outline-none focus:border-[#1A1A1A]"
+                        />
                       </div>
                     </div>
                     
-                    <button
-                      onClick={() => handleToggleProvider(name, p.enabled)}
-                      className={cn(
-                        "mt-auto w-full text-[10px] font-bold py-2 uppercase tracking-widest cursor-pointer transition-colors",
-                        p.enabled ? "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100" : "bg-green-50 text-green-600 border border-green-200 hover:bg-green-100"
-                      )}
-                    >
-                      {p.enabled ? 'Disable Provider' : 'Enable Provider'}
-                    </button>
+                    <div className="mt-auto space-y-2">
+                      <button
+                        onClick={() => handleSaveProviderModels(name)}
+                        disabled={savingProvider === name}
+                        className="w-full text-[9px] font-bold py-1.5 uppercase tracking-widest border border-[#1A1A1A]/30 hover:border-[#1A1A1A] bg-white hover:bg-zinc-50 transition-colors cursor-pointer"
+                      >
+                        {savingProvider === name ? 'Saving...' : 'Save Models'}
+                      </button>
+                      <button
+                        onClick={() => handleToggleProvider(name, p.enabled)}
+                        className={cn(
+                          "w-full text-[10px] font-bold py-2 uppercase tracking-widest cursor-pointer transition-colors",
+                          p.enabled ? "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100" : "bg-green-50 text-green-600 border border-green-200 hover:bg-green-100"
+                        )}
+                      >
+                        {p.enabled ? 'Disable Provider' : 'Enable Provider'}
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -523,7 +762,7 @@ export default function App() {
         </div>
 
         {/* Footer Metric Bar */}
-        <footer className="mt-auto pt-8 border-t-2 border-[#1A1A1A] grid grid-cols-2 md:grid-cols-4 gap-8 text-[10px] font-bold uppercase tracking-[0.2em] mb-4">
+        <footer className="mt-auto pt-8 border-t-2 border-[#1A1A1A] grid grid-cols-2 md:grid-cols-5 gap-8 text-[10px] font-bold uppercase tracking-[0.2em] mb-4">
           <div className="flex flex-col gap-1">
             <span className="opacity-40">System Latency</span>
             <span>{logs.length > 0 ? (logs.reduce((a, b) => a + b.duration, 0) / logs.length).toFixed(0) : 0}ms Avg</span>
@@ -531,6 +770,10 @@ export default function App() {
           <div className="flex flex-col gap-1">
             <span className="opacity-40">Throughput</span>
             <span>{logs.length} Requests Observed</span>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="opacity-40">Vector Cache</span>
+            <span className="text-emerald-700 font-bold">{logs.filter(l => l.cached).length} Hits (Free)</span>
           </div>
           <div className="flex flex-col gap-1">
             <span className="opacity-40">Allocation State</span>

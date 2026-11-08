@@ -34,7 +34,7 @@ export class GatewayManager {
         gemini: {
           enabled: true,
           priority: 1,
-          cheapModel: 'gemini-3-flash-preview',
+          cheapModel: 'gemini-3.5-flash-lite',
           expertModel: 'gemini-3.1-pro-preview',
           healthy: true,
           lastChecked: new Date().toISOString(),

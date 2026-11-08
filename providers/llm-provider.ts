@@ -21,6 +21,8 @@ export interface GlobalConfig {
   failoverOrder: string[];
   timeoutMs: number;
   maxRetries: number;
+  uptimeSeconds?: number;
+  difficultyThreshold?: number;
 }
 
 export interface LLMProvider {

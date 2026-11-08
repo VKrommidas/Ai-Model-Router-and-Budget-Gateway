@@ -1,4 +1,5 @@
 import { collection, addDoc, query, getDocs, orderBy, limit, deleteDoc, doc } from 'firebase/firestore';
+import { cosineSimilarity } from './router-logic.js';
 
 export interface CacheEntry {
   id: string;
@@ -8,6 +9,7 @@ export interface CacheEntry {
   cost: number;
   duration: number;
   timestamp: string;
+  similarity?: number;
 }
 
 export interface CacheStats {
@@ -26,22 +28,12 @@ export interface CacheProvider {
   clear(): Promise<void>;
 }
 
-function cosineSimilarity(vecA: number[], vecB: number[]): number {
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < vecA.length; i++) {
-    dotProduct += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
+
 
 export class FirestoreCacheProvider implements CacheProvider {
   private db: any;
   private cacheCollection = 'semantic_cache';
+  private memoryFallback: CacheEntry[] = [];
   
   private stats: CacheStats = {
     hits: 0,
@@ -52,6 +44,27 @@ export class FirestoreCacheProvider implements CacheProvider {
 
   constructor(db: any) {
     this.db = db;
+  }
+
+  private searchMemory(embedding: number[], threshold: number): CacheEntry | null {
+    let bestMatch: CacheEntry | null = null;
+    let highestSimilarity = -1;
+
+    for (const entry of this.memoryFallback) {
+      if (entry.embedding && Array.isArray(entry.embedding)) {
+        const sim = cosineSimilarity(embedding, entry.embedding);
+        if (sim > highestSimilarity) {
+          highestSimilarity = sim;
+          bestMatch = { ...entry, similarity: sim };
+        }
+      }
+    }
+
+    if (bestMatch && highestSimilarity >= threshold) {
+      console.info(`[CacheProvider:Memory] Best match similarity: ${(highestSimilarity * 100).toFixed(1)}% (Threshold: ${(threshold * 100).toFixed(1)}%)`);
+      return bestMatch;
+    }
+    return null;
   }
 
   async search(embedding: number[], threshold: number): Promise<CacheEntry | null> {
@@ -69,39 +82,59 @@ export class FirestoreCacheProvider implements CacheProvider {
           const sim = cosineSimilarity(embedding, docEmbedding);
           if (sim > highestSimilarity) {
             highestSimilarity = sim;
-            bestMatch = { id: docSnap.id, ...data } as CacheEntry;
+            bestMatch = { id: docSnap.id, ...data, similarity: sim } as CacheEntry;
           }
         }
       });
 
       if (bestMatch && highestSimilarity >= threshold) {
+        console.info(`[CacheProvider:Firestore] Best match similarity: ${(highestSimilarity * 100).toFixed(1)}% (Threshold: ${(threshold * 100).toFixed(1)}%)`);
         return bestMatch;
       }
-      return null;
-    } catch (e) {
-      console.error('[CacheProvider] Search error:', e);
-      return null;
+      
+      // Fallback to in-memory entries if Firestore didn't have it
+      return this.searchMemory(embedding, threshold);
+    } catch (e: any) {
+      // Permission denied or offline: seamlessly search in-memory cache
+      console.info('[CacheProvider] Firestore access restricted, searching local memory cache...');
+      return this.searchMemory(embedding, threshold);
     }
   }
 
   async store(prompt: string, response: string, embedding: number[], cost: number, duration: number): Promise<void> {
-    if (!response || response.trim().length === 0 || response.includes('Error')) {
+    if (!response || response.trim().length === 0 || response.toLowerCase().includes('error')) {
       return; 
     }
+
+    const entry: CacheEntry = {
+      id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      prompt,
+      response,
+      embedding,
+      cost,
+      duration,
+      timestamp: new Date().toISOString()
+    };
+
+    // Always store in memory cache
+    this.memoryFallback.push(entry);
+    if (this.memoryFallback.length > 200) {
+      this.memoryFallback.shift(); // retain last 200 entries
+    }
     
-    // Prevent exactly identical prompts from duplicating, basic check
+    // Attempt Firestore persistence
     try {
-      const entry = {
+      await addDoc(collection(this.db, this.cacheCollection), {
         prompt,
         response,
         embedding,
         cost,
         duration,
-        timestamp: new Date().toISOString()
-      };
-      await addDoc(collection(this.db, this.cacheCollection), entry);
-    } catch (e) {
-      console.error('[CacheProvider] Store error:', e);
+        timestamp: entry.timestamp
+      });
+      console.info(`[CacheProvider] Stored entry to Firestore & local memory for: "${prompt.slice(0, 40)}..."`);
+    } catch (e: any) {
+      console.info(`[CacheProvider] Firestore sync skipped (${e.code || 'restricted rules'}); stored in local memory cache.`);
     }
   }
 
@@ -134,3 +167,4 @@ export class FirestoreCacheProvider implements CacheProvider {
     }
   }
 }
+
