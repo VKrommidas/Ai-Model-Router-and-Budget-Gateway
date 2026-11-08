@@ -1,0 +1,42 @@
+{
+  "entities": {
+    "Config": {
+      "title": "Global Configuration",
+      "description": "System-wide settings and budget tracking",
+      "type": "object",
+      "properties": {
+        "monthlyBudget": { "type": "number", "description": "The total budget limit for the month in USD" },
+        "totalSpend": { "type": "number", "description": "Cumulative cost in USD" },
+        "currency": { "type": "string", "description": "Currency code (usually USD)" },
+        "lastReset": { "type": "string", "format": "date-time", "description": "When the budget was last reset" }
+      },
+      "required": ["monthlyBudget", "totalSpend"]
+    },
+    "RouterLog": {
+      "title": "Router Log",
+      "description": "Log of an individual routed request",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "prompt": { "type": "string" },
+        "response": { "type": "string" },
+        "model": { "type": "string" },
+        "cost": { "type": "number" },
+        "tokens": { "type": "integer" },
+        "difficulty": { "type": "number" },
+        "classification": { "type": "string", "enum": ["easy", "medium", "hard"] }
+      },
+      "required": ["timestamp", "prompt", "model", "cost"]
+    }
+  },
+  "firestore": {
+    "/config/global": {
+      "schema": "Config",
+      "description": "Global system configuration"
+    },
+    "/logs": {
+      "schema": "RouterLog",
+      "description": "Collection of routing history"
+    }
+  }
+}

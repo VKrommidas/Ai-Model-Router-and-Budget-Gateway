@@ -1,0 +1,6 @@
+When a prompt is sent to the gateway
+
+Dynamic Provider Selection The gateway retrieves the current configuration from Firestore, filtering for enabled and healthy providers. It sorts them based on the failoverOrder array.
+Retry Strategy with Exponential Backoff Each provider invocation is wrapped in a retry loop. If a request fails, the system waits for an exponential backoff period (500ms  2^attempt) before retrying.
+Timeout Handling Every call enforces a maximum response threshold (timeoutMs - default 15s) using an AbortController. If a provider takes too long, the gateway aborts the request, flags the provider as unhealthy in Firestore, and triggers failover.
+Cascade Failover If all retries for the primary provider fail (or timeout), the gateway catches the exception, logs an alert, dynamically switches to the next healthy provider in the failover chain, and repeats the execution. This ensures near-100% system availability.

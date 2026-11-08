@@ -1,0 +1,6 @@
+{
+  "name": "AI Model Router & Budget Gateway",
+  "description": "An intelligent API gateway that routes queries between cheap and expert AI models based on difficulty and budget constraints, with real-time cost tracking and analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
